@@ -1,7 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useProfile } from "@/hooks/useProfile";
-import { diasEmAtraso, round2, situacaoParcela, worseSituacao, type SituacaoParcela } from "@/lib/cobranca";
+import { fetchAllPages } from "@/lib/fetchAllPages";
+import {
+  diasEmAtraso,
+  round2,
+  situacaoParcela,
+  worseSituacao,
+  type SituacaoParcela,
+} from "@/lib/cobranca";
 
 export interface CobrancaInstallmentRow {
   id: string;
@@ -53,19 +60,22 @@ export function useCobrancaInstallments() {
     queryKey: ["cobranca_installments", orgId],
     enabled: !!orgId,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("installments")
-        .select(
-          `*, orders!inner(
+      const data = await fetchAllPages((from, to) =>
+        supabase
+          .from("installments")
+          .select(
+            `*, orders!inner(
             id, order_number, order_type, total_amount, installments, status, created_at, customer_id, organization_id,
             customers(id, name, cpf_cnpj, phone, whatsapp, is_deleted, customer_addresses(city, neighborhood, street, number, complement)),
             order_items(quantity, products(name))
           )`,
-        )
-        .eq("orders.organization_id", orgId!)
-        .neq("orders.status", "Cancelado")
-        .order("due_date");
-      if (error) throw error;
+          )
+          .eq("orders.organization_id", orgId!)
+          .neq("orders.status", "Cancelado")
+          .order("due_date")
+          .order("id")
+          .range(from, to),
+      );
       // Se a coluna amount_paid não vem no payload, o cache de schema do
       // PostgREST ainda não foi recarregado depois da migration — avisa
       // explicitamente em vez de deixar a UI esconder a baixa silenciosamente.
@@ -109,7 +119,11 @@ export function groupInstallmentsByOrder(rows: CobrancaInstallmentRow[]): Cobran
 
   for (const row of rows) {
     const saldo = round2(row.amount - row.amount_paid);
-    const situacao = situacaoParcela({ amount: row.amount, amountPaid: row.amount_paid, dueDate: row.due_date });
+    const situacao = situacaoParcela({
+      amount: row.amount,
+      amountPaid: row.amount_paid,
+      dueDate: row.due_date,
+    });
     const dias = diasEmAtraso(row.due_date, saldo);
 
     let group = groups.get(row.order_id);
@@ -167,13 +181,17 @@ export function useCobrancaRecebimentosPeriodo() {
       const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
-      const { data, error } = await supabase
-        .from("installment_payments")
-        .select("amount, created_at")
-        .eq("organization_id", orgId!)
-        .eq("status", "ativo")
-        .gte("created_at", startOfMonth);
-      if (error) throw error;
+      const data = await fetchAllPages((from, to) =>
+        supabase
+          .from("installment_payments")
+          .select("amount, created_at")
+          .eq("organization_id", orgId!)
+          .eq("status", "ativo")
+          .gte("created_at", startOfMonth)
+          .order("created_at")
+          .order("id")
+          .range(from, to),
+      );
 
       const rows = data ?? [];
       const recebidoHoje = rows
@@ -203,7 +221,10 @@ export function useInstallmentPaymentHistory(installmentId: string | null) {
       ]);
       if (error) throw error;
 
-      const orgProfiles = (orgProfilesRaw ?? []) as unknown as { id: string; full_name: string | null }[];
+      const orgProfiles = (orgProfilesRaw ?? []) as unknown as {
+        id: string;
+        full_name: string | null;
+      }[];
       const profileById = new Map(orgProfiles.map((p) => [p.id, p.full_name]));
 
       return (payments ?? []).map((p) => ({
@@ -227,13 +248,16 @@ export function useReceiveInstallmentPayment() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: ReceivePaymentInput) => {
-      const { data, error } = await supabase.rpc("fn_receive_installment_payment" as never, {
-        p_installment_id: input.installmentId,
-        p_payment_method: input.paymentMethod,
-        p_amount: input.amount ?? null,
-        p_notes: input.notes ?? null,
-        p_client_request_id: input.clientRequestId,
-      } as never);
+      const { data, error } = await supabase.rpc(
+        "fn_receive_installment_payment" as never,
+        {
+          p_installment_id: input.installmentId,
+          p_payment_method: input.paymentMethod,
+          p_amount: input.amount ?? null,
+          p_notes: input.notes ?? null,
+          p_client_request_id: input.clientRequestId,
+        } as never,
+      );
       if (error) throw error;
       return data;
     },
@@ -259,10 +283,13 @@ export function useCancelInstallmentPayment() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: CancelPaymentInput) => {
-      const { data, error } = await supabase.rpc("fn_cancel_installment_payment" as never, {
-        p_payment_id: input.paymentId,
-        p_reason: input.reason ?? null,
-      } as never);
+      const { data, error } = await supabase.rpc(
+        "fn_cancel_installment_payment" as never,
+        {
+          p_payment_id: input.paymentId,
+          p_reason: input.reason ?? null,
+        } as never,
+      );
       if (error) throw error;
       return data;
     },
@@ -283,7 +310,11 @@ export function useLogCollectionAttempt() {
   const orgId = profile?.active_org_id;
 
   return useMutation({
-    mutationFn: async (input: { installmentId: string; channel: string; notes?: string | null }) => {
+    mutationFn: async (input: {
+      installmentId: string;
+      channel: string;
+      notes?: string | null;
+    }) => {
       const {
         data: { user },
       } = await supabase.auth.getUser();
